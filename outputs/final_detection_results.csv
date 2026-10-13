@@ -1,0 +1,7 @@
+Model,Detection Rate
+Baseline FDI,9.18
+Robust FDI,63.29
+AIDM FDI,65.26
+Baseline TSA,0.0
+Robust TSA,53.11
+AIDM TSA,55.43
