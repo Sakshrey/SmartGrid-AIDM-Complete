@@ -1,97 +1,100 @@
 import pandas as pd
 import numpy as np
 import joblib
+
 from tensorflow.keras.models import load_model
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from sklearn.metrics import confusion_matrix
-
-model = joblib.load(
-    "models/balanced_unified_random_forest.pkl"
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    classification_report
 )
 
-autoencoder = load_model(
-    "models/autoencoder.keras"
-)
+print("Loading models...")
 
-scaler = joblib.load(
-    "models/autoencoder_scaler.pkl"
-)
+model = joblib.load("models/balanced_unified_random_forest.pkl")
+autoencoder = load_model("models/autoencoder.keras")
+scaler = joblib.load("models/autoencoder_scaler.pkl")
+threshold = joblib.load("models/autoencoder_threshold.pkl")
 
-threshold = joblib.load(
-    "models/autoencoder_threshold.pkl"
-)
+features = [
+    "Actual frequency value",
+    "Fraction of second",
+    "PMU time",
+    "PDC time",
+    "interarrival time",
+    "time difference"
+]
 
-fdi = pd.read_csv(
-    "dataset/processed_fdi_test.csv"
-)
+print("Loading test datasets...")
 
-tsa = pd.read_csv(
-    "dataset/processed_tsa_test.csv"
-)
+fdi = pd.read_csv("dataset/processed_fdi_test.csv")
+tsa = pd.read_csv("dataset/processed_tsa_test.csv")
+subtle_fdi = pd.read_csv("dataset/final_subtle_fdi_test.csv")
+subtle_tsa = pd.read_csv("dataset/final_subtle_tsa_test.csv")
 
-subtle_fdi = pd.read_csv(
-    "dataset/final_subtle_fdi_test.csv"
-)
+normal = fdi[fdi["attack_type"] == "Normal"].sample(
+    10000, random_state=42
+).copy()
 
-subtle_tsa = pd.read_csv(
-    "dataset/final_subtle_tsa_test.csv"
-)
+original_fdi = fdi[fdi["attack_type"] == "FDI"].sample(
+    10000, random_state=42
+).copy()
 
-normal = fdi[
-    fdi["attack_type"] == "Normal"
-].sample(10000, random_state=42)
-
-original_fdi = fdi[
-    fdi["attack_type"] == "FDI"
-].sample(10000, random_state=42)
-
-original_tsa = tsa[
-    tsa["attack_type"] == "TSA"
-].sample(10000, random_state=42)
+original_tsa = tsa[tsa["attack_type"] == "TSA"].sample(
+    10000, random_state=42
+).copy()
 
 subtle_fdi = subtle_fdi.sample(
-    10000,
-    random_state=42
-)
+    10000, random_state=42
+).copy()
 
 subtle_tsa = subtle_tsa.sample(
-    10000,
-    random_state=42
-)
+    10000, random_state=42
+).copy()
 
 normal["true_label"] = "Normal"
 original_fdi["true_label"] = "FDI"
-original_tsa["true_label"] = "TSA"
 subtle_fdi["true_label"] = "FDI"
+original_tsa["true_label"] = "TSA"
 subtle_tsa["true_label"] = "TSA"
 
 test_data = pd.concat(
-    [
-        normal,
-        original_fdi,
-        subtle_fdi,
-        original_tsa,
-        subtle_tsa
-    ],
+    [normal, original_fdi, subtle_fdi, original_tsa, subtle_tsa],
     ignore_index=True
 )
 
-x = test_data.drop(
-    columns=[
-        "attack_type",
-        "true_label",
-        "original_frequency"
-    ],
-    errors="ignore"
-)
+x = test_data[features].copy()
+true_label = test_data["true_label"].to_numpy()
 
-true_label = test_data["true_label"].values
+print("\nDataset Verification")
+print("--------------------")
+print("Normal samples:", len(normal))
+print("Original FDI samples:", len(original_fdi))
+print("Subtle FDI samples:", len(subtle_fdi))
+print("Original TSA samples:", len(original_tsa))
+print("Subtle TSA samples:", len(subtle_tsa))
+print("Feature shape:", x.shape)
+print("Total test samples:", len(true_label))
 
-print("Running Random Forest...")
+print("\nTrue-label distribution:")
+print(pd.Series(true_label).value_counts())
 
+if x.isnull().any().any():
+    raise ValueError("Missing values found in test features.")
+
+if not np.isfinite(x.to_numpy(dtype=float)).all():
+    raise ValueError("Non-finite values found in test features.")
+
+if list(model.feature_names_in_) != features:
+    print("\nWarning: Verify that test features match the model's training features.")
+
+print("\nRunning Random Forest...")
 rf_prediction = model.predict(x)
 
-print("Running Autoencoder...")
+print("\nRunning Autoencoder...")
 
 x_scaled = scaler.transform(x)
 
@@ -101,6 +104,11 @@ reconstructed = autoencoder.predict(
     verbose=0
 )
 
+if reconstructed.shape != x_scaled.shape:
+    raise ValueError(
+        "Autoencoder output shape does not match scaled input shape."
+    )
+
 error = np.mean(
     np.square(x_scaled - reconstructed),
     axis=1
@@ -108,102 +116,182 @@ error = np.mean(
 
 ae_prediction = error > threshold
 
-print("Combining AIDM results...")
+print("\nAutoencoder Analysis")
+print("--------------------")
+print("Reconstruction error threshold:", threshold)
+print("Autoencoder flagged samples:", int(np.sum(ae_prediction)))
+print(
+    "Autoencoder flagged percentage:",
+    round(np.mean(ae_prediction) * 100, 2),
+    "%"
+)
+
+print("\nFinal Prediction Selection")
+print("--------------------------")
+print("Using Random Forest predictions as the evaluation baseline.")
 
 final_prediction = rf_prediction.copy()
 
-rf_probability = model.predict_proba(x)
+print("Predictions changed by fusion: 0")
 
-classes = model.classes_
+labels = ["Normal", "FDI", "TSA"]
 
-for i in range(len(final_prediction)):
-
-    if ae_prediction[i] and final_prediction[i] == "Normal":
-
-        best_index = np.argmax(
-            rf_probability[i]
-        )
-
-        final_prediction[i] = classes[best_index]
-
-print("\nFinal Unified AIDM Evaluation")
-print("------------------------------")
-
-print("Normal samples:", sum(true_label == "Normal"))
-print("FDI samples:", sum(true_label == "FDI"))
-print("TSA samples:", sum(true_label == "TSA"))
-print("Total samples:", len(true_label))
-
-accuracy = accuracy_score(
-    true_label,
-    final_prediction
-)
+accuracy = accuracy_score(true_label, final_prediction)
 
 precision = precision_score(
     true_label,
     final_prediction,
-    average="weighted"
+    average="weighted",
+    zero_division=0
 )
 
 recall = recall_score(
     true_label,
     final_prediction,
-    average="weighted"
+    average="weighted",
+    zero_division=0
 )
 
 f1 = f1_score(
     true_label,
     final_prediction,
-    average="weighted"
+    average="weighted",
+    zero_division=0
 )
+
+cm = confusion_matrix(
+    true_label,
+    final_prediction,
+    labels=labels
+)
+
+print("\nUnified AIDM Baseline Evaluation")
+print("--------------------------------")
+print("Total samples:", len(true_label))
+print("Total predictions:", len(final_prediction))
 
 print("\nOverall Results")
-
-print("Accuracy :", accuracy)
-print("Precision:", precision)
-print("Recall   :", recall)
-print("F1 Score :", f1)
+print("Accuracy :", round(accuracy * 100, 2), "%")
+print("Precision:", round(precision * 100, 2), "%")
+print("Recall   :", round(recall * 100, 2), "%")
+print("F1 Score :", round(f1 * 100, 2), "%")
 
 print("\nConfusion Matrix")
+print("Rows = Actual labels")
+print("Columns = Predicted labels")
+print("Label order:", labels)
+print(cm)
+
+print("\nEvaluation Verification")
+print("-----------------------")
+print("Confusion matrix total:", cm.sum())
+print("True-label count:", len(true_label))
+print("Prediction count:", len(final_prediction))
+
+print("\nClassification Report")
+print("---------------------")
 
 print(
-    confusion_matrix(
+    classification_report(
         true_label,
         final_prediction,
-        labels=[
-            "Normal",
-            "FDI",
-            "TSA"
-        ]
+        labels=labels,
+        zero_division=0
     )
 )
 
-print("\nAttack-wise Detection")
+print("\nClass-wise Detection")
+print("--------------------")
 
-for attack in ["FDI", "TSA"]:
+for label in labels:
+    mask = true_label == label
+    total = int(np.sum(mask))
+    correct = int(np.sum(final_prediction[mask] == label))
 
-    total = sum(
-        true_label == attack
-    )
-
-    detected = sum(
-        (true_label == attack) &
-        (final_prediction == attack)
-    )
-
-    rate = detected / total * 100
+    detection_rate = correct / total * 100 if total else 0
 
     print(
-        attack,
-        "Detection Rate:",
-        rate,
+        label,
+        "correct:",
+        correct,
+        "out of",
+        total
+    )
+
+    print(
+        "Detection rate:",
+        round(detection_rate, 2),
         "%"
     )
 
-print("\nPrediction Distribution")
+print("\nAttack-wise Detection")
+print("---------------------")
 
-print(
-    pd.Series(
-        final_prediction
-    ).value_counts()
-)
+groups = [
+    ("Normal", 0, 10000),
+    ("Original FDI", 10000, 20000),
+    ("Subtle FDI", 20000, 30000),
+    ("Original TSA", 30000, 40000),
+    ("Subtle TSA", 40000, 50000)
+]
+
+for name, start, end in groups:
+    actual = true_label[start:end]
+    predicted = final_prediction[start:end]
+
+    if len(actual) == 0:
+        print(name, "- no samples")
+        continue
+
+    correct = int(np.sum(actual == predicted))
+    total = len(actual)
+
+    print(
+        name + ":",
+        round(correct / total * 100, 2),
+        "% correctly classified"
+    )
+
+print("\nFalse Alarm Analysis")
+print("--------------------")
+
+normal_actual = true_label[:10000]
+normal_predicted = final_prediction[:10000]
+
+false_alarms = int(np.sum(normal_predicted != "Normal"))
+normal_total = len(normal_actual)
+
+print("Normal samples:", normal_total)
+print("False alarms:", false_alarms)
+
+if normal_total:
+    print(
+        "False Alarm Rate:",
+        round(false_alarms / normal_total * 100, 2),
+        "%"
+    )
+
+print("\nAutoencoder Analysis by Actual Class")
+print("------------------------------------")
+
+for name, start, end in groups:
+    flags = ae_prediction[start:end]
+    total = len(flags)
+    flagged = int(np.sum(flags))
+
+    print(
+        name,
+        "- flagged:",
+        flagged,
+        "out of",
+        total,
+        "(",
+        round(flagged / total * 100, 2) if total else 0,
+        "%)"
+    )
+
+print("\nPrediction Distribution")
+print("-----------------------")
+print(pd.Series(final_prediction).value_counts())
+
+print("\nEvaluation completed.")
